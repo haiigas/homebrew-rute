@@ -3,7 +3,7 @@
 # Thin orchestrator over nginx + mkcert + /etc/hosts. No proxy of its own.
 set -uo pipefail
 
-VERSION="0.2.2"
+VERSION="0.2.3"
 PROG="rute"
 
 BREW="${RUTE_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
@@ -172,7 +172,7 @@ generate() {
   gen_nginx
   gen_cert
   gen_hosts
-  [ "$old" != "$(sum "$CONF")" ] && reload_nginx
+  if [ "$old" != "$(sum "$CONF")" ]; then reload_nginx; fi
 }
 
 # ---- process supervision (project mode) ------------------------------------
@@ -184,6 +184,20 @@ wait_port() {
     sleep 0.5; i=$((i + 1))
   done
   return 1
+}
+
+pid_on_port() { lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print $2}'; }
+
+# die if any site's port is already taken — before starting anything
+check_ports_free() { # parse-file
+  local idx cmd port doms pid
+  while IFS=$'\t' read -r idx cmd port doms; do
+    [ -n "$port" ] || continue
+    if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+      pid="$(pid_on_port "$port")"
+      die "port $port already in use (pid ${pid:-?}) — stop it first: kill ${pid:-<pid>}"
+    fi
+  done < "$1"
 }
 
 start_site() { # projdir idx dir command port
@@ -269,6 +283,7 @@ cmd_link() {
 
   local tmp; tmp="$(mktemp)"
   parse_rute "$dir/.rute" > "$tmp"
+  check_ports_free "$tmp"
   local idx cmd port doms
   while IFS=$'\t' read -r idx cmd port doms; do
     [ -n "$cmd" ]  || die "site $idx: missing command"
@@ -313,6 +328,7 @@ cmd_up() {
   [ -f "$dir/.rute" ] || die "no .rute in $dir"
   local tmp idx cmd port; tmp="$(mktemp)"
   parse_rute "$dir/.rute" > "$tmp"
+  check_ports_free "$tmp"
   while IFS=$'\t' read -r idx cmd port _; do
     start_site "$projdir" "$idx" "$dir" "$cmd" "$port"
   done < "$tmp"
