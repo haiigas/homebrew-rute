@@ -3,7 +3,7 @@
 # Thin orchestrator over nginx + mkcert + /etc/hosts. No proxy of its own.
 set -uo pipefail
 
-VERSION="0.1.0"
+VERSION="0.1.1"
 PROG="rute"
 
 BREW="${RUTE_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
@@ -41,11 +41,11 @@ usage:
   $PROG --version
 
 examples:
-  $PROG add kitanikahin.local        4002
-  $PROG add api.kitanikahin.local    8080
-  $PROG add pay.kitanikahin.local    4003
-  $PROG add kitanikahin.test         4006
-  $PROG add studio.kitanikahin.test  8001
+  $PROG add example.local        4002
+  $PROG add api.example.local    8080
+  $PROG add pay.example.local    4003
+  $PROG add example.test         4006
+  $PROG add studio.example.test  8001
 
 every domain is added one by one. requires nginx + mkcert (brew). first run
 asks sudo to edit /etc/hosts and to start nginx.

@@ -23,13 +23,13 @@ Requires `nginx` and `mkcert` (pulled in automatically).
 ## Usage
 
 ```bash
-rute add kitanikahin.local        4002
-rute add api.kitanikahin.local    8080
-rute add pay.kitanikahin.local    4003
-rute add kitanikahin.test         4006
-rute add studio.kitanikahin.test  8001
+rute add example.local        4002
+rute add api.example.local    8080
+rute add pay.example.local    4003
+rute add example.test         4006
+rute add studio.example.test  8001
 rute ls
-rute rm pay.kitanikahin.local
+rute rm pay.example.local
 rute sync
 rute doctor
 ```
