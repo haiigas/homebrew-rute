@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# rute — map local domains to ports over HTTPS.
+# rute — map local domains to ports over HTTPS, and run project dev servers.
 # Thin orchestrator over nginx + mkcert + /etc/hosts. No proxy of its own.
 set -uo pipefail
 
-VERSION="0.1.1"
+VERSION="0.2.0"
 PROG="rute"
 
 BREW="${RUTE_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
@@ -14,6 +14,7 @@ HOSTS="${RUTE_HOSTS:-/etc/hosts}"
 
 RUTE_HOME="${RUTE_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/rute}"
 ROUTES="$RUTE_HOME/routes"
+PROJECTS="$RUTE_HOME/projects"
 CERT_SIG="$RUTE_HOME/certsig"
 CONF="$NGINX_SERVERS/rute.conf"
 CERT="$NGINX_CERTS/rute.pem"
@@ -29,36 +30,42 @@ sum()   { shasum "$1" 2>/dev/null | awk '{print $1}'; }
 
 usage() {
   cat <<EOF
-$PROG $VERSION — map local domains to ports over HTTPS
+$PROG $VERSION — map local domains to ports, and run project dev servers
 
 usage:
-  $PROG add <domain> <port>     map domain -> 127.0.0.1:port
-  $PROG rm  <domain>            remove a mapping
-  $PROG ls                      list mappings
+  $PROG proxy <domain> <port>   reverse-proxy a domain to an already-running port
+  $PROG link [dir]              read .rute, start the project's servers, map domains
+  $PROG unlink [dir]            stop the project and remove its routes
+  $PROG up <name>               start a linked project's servers
+  $PROG down <name>             stop a linked project's servers
+  $PROG ls                      list routes and projects
+  $PROG rm <domain>             remove a single route
   $PROG sync                    regenerate nginx/hosts/cert and reload
   $PROG doctor                  check dependencies and services
   $PROG -h | --help
   $PROG --version
 
-examples:
-  $PROG add example.local        4002
-  $PROG add api.example.local    8080
-  $PROG add pay.example.local    4003
-  $PROG add example.test         4006
-  $PROG add studio.example.test  8001
+.rute (in a project root):
+  name = myapp
+  [site]
+  command = php artisan serve --host=127.0.0.1 --port=4006
+  port    = 4006
+  domain  = kitanikahin.local
+  domain  = api.kitanikahin.local
 
-every domain is added one by one. requires nginx + mkcert (brew). first run
-asks sudo to edit /etc/hosts and to start nginx.
+examples:
+  $PROG proxy api.example.local 8080
+  cd ~/dev/laravel-app && $PROG link
+  $PROG down laravel-app
 EOF
 }
 
 valid_domain() {
   printf '%s' "$1" | grep -Eq '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]([a-z0-9-]*[a-z0-9])?$'
 }
-
 valid_port() { printf '%s' "$1" | grep -Eq '^[0-9]{1,5}$' && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 
-# ---- state -----------------------------------------------------------------
+# ---- route state -----------------------------------------------------------
 
 state_init() { mkdir -p "$RUTE_HOME"; [ -f "$ROUTES" ] || : > "$ROUTES"; }
 
@@ -68,14 +75,12 @@ state_add() {
   printf '%s %s\n' "$d" "$p" >> "$tmp"
   mv "$tmp" "$ROUTES"
 }
-
 state_del() {
   local d="$1" tmp; state_init; tmp="$(mktemp)"
   awk -v d="$d" '!($1==d && $1 !~ /^#/) { print }' "$ROUTES" > "$tmp"
   mv "$tmp" "$ROUTES"
 }
-
-domains()   { awk 'NF && $1 !~ /^#/ { print $1 }' "$ROUTES"; }
+domains() { awk 'NF && $1 !~ /^#/ { print $1 }' "$ROUTES"; }
 
 # ---- generation ------------------------------------------------------------
 
@@ -155,7 +160,6 @@ reload_nginx() {
   if pgrep -x nginx >/dev/null 2>&1; then
     sudo nginx -s reload 2>/dev/null || info "nginx reload failed — run: sudo nginx -s reload"
   else
-    sudo nginx -t >/dev/null 2>&1 || info "nginx config test failed — run: sudo nginx -t"
     sudo brew services start nginx >/dev/null 2>&1 || info "nginx start failed — run: sudo brew services start nginx"
   fi
 }
@@ -170,16 +174,154 @@ generate() {
   [ "$old" != "$(sum "$CONF")" ] && reload_nginx
 }
 
+# ---- process supervision (project mode) ------------------------------------
+
+wait_port() {
+  local port="$1" t="${2:-30}" i=0
+  while [ "$i" -lt "$t" ]; do
+    nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && return 0
+    sleep 0.5; i=$((i + 1))
+  done
+  return 1
+}
+
+start_site() { # projdir idx dir command port
+  local projdir="$1" idx="$2" dir="$3" cmd="$4" port="$5"
+  local log="$projdir/site-$idx.log" pidfile="$projdir/site-$idx.pid"
+  mkdir -p "$projdir"
+  set -m
+  ( cd "$dir" && exec bash -lc "$cmd" ) </dev/null >"$log" 2>&1 &
+  local pid=$!
+  set +m
+  printf '%s' "$pid" > "$pidfile"
+  if wait_port "$port"; then
+    info "site $idx up (pid $pid, port $port)"
+    return 0
+  fi
+  info "site $idx: port $port not ready — see $log"
+  return 1
+}
+
+stop_site() { # projdir idx
+  local pidfile="$1/site-$2.pid"
+  [ -f "$pidfile" ] || return 0
+  local pid; pid="$(cat "$pidfile" 2>/dev/null)"
+  if [ -n "$pid" ]; then
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+    sleep 0.3
+    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+  fi
+  rm -f "$pidfile"
+}
+
+# awk: parse .rute -> "idx<TAB>command<TAB>port<TAB>dom1,dom2,..." per [site]
+parse_rute() {
+  awk '
+    function flush() { if (idx > 0) printf "%d\t%s\t%s\t%s\n", idx, cmd, port, doms }
+    /^[[:space:]]*\[site\][[:space:]]*$/ { flush(); idx++; cmd=""; port=""; doms=""; next }
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    {
+      eq = index($0, "="); if (eq == 0) next
+      k = substr($0, 1, eq-1); v = substr($0, eq+1)
+      gsub(/^[ \t]+|[ \t]+$/, "", k); gsub(/^[ \t]+|[ \t]+$/, "", v)
+      if (k == "command") cmd = v
+      else if (k == "port") port = v
+      else if (k == "domain") doms = (doms == "" ? v : doms "," v)
+    }
+    END { flush() }
+  ' "$1"
+}
+
+rute_name() { # dir
+  local n; n="$(awk -F= '/^name[[:space:]]*=/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2; exit}' "$1/.rute")"
+  [ -n "$n" ] || n="$(basename "$1")"
+  printf '%s' "$n"
+}
+
 # ---- commands --------------------------------------------------------------
 
-cmd_add() {
-  [ $# -eq 2 ] || die "usage: $PROG add <domain> <port>"
+cmd_proxy() {
+  [ $# -eq 2 ] || die "usage: $PROG proxy <domain> <port>"
   local d; d="$(lower "$1")"
   valid_domain "$d" || die "invalid domain: $1"
   valid_port "$2" || die "invalid port: $2"
   state_add "$d" "$2"
-  info "added $d -> 127.0.0.1:$2"
+  info "proxied $d -> 127.0.0.1:$2"
   generate
+}
+
+cmd_link() {
+  local dir="${1:-$PWD}"
+  [ -f "$dir/.rute" ] || die "no .rute in $dir"
+  local name; name="$(rute_name "$dir")"
+  local projdir="$PROJECTS/$name"
+  mkdir -p "$projdir"
+  printf '%s' "$dir" > "$projdir/dir"
+  : > "$projdir/domains"
+
+  local tmp; tmp="$(mktemp)"
+  parse_rute "$dir/.rute" > "$tmp"
+  local idx cmd port doms
+  while IFS=$'\t' read -r idx cmd port doms; do
+    [ -n "$cmd" ]  || die "site $idx: missing command"
+    [ -n "$port" ] || die "site $idx: missing port"
+    start_site "$projdir" "$idx" "$dir" "$cmd" "$port"
+    local d
+    for d in $(printf '%s' "$doms" | tr ',' ' '); do
+      d="$(lower "$d")"
+      valid_domain "$d" || { info "skip invalid domain: $d"; continue; }
+      state_add "$d" "$port"
+      printf '%s\n' "$d" >> "$projdir/domains"
+      info "  linked https://$d -> 127.0.0.1:$port"
+    done
+  done < "$tmp"
+  rm -f "$tmp"
+  generate
+}
+
+cmd_unlink() {
+  local dir="${1:-$PWD}"
+  local name; name="$(rute_name "$dir")"
+  local projdir="$PROJECTS/$name"
+  [ -d "$projdir" ] || die "project not linked: $name"
+  local f
+  for f in "$projdir"/site-*.pid; do
+    [ -e "$f" ] || continue
+    stop_site "$projdir" "$(printf '%s' "$f" | sed 's/.*site-//; s/\.pid//')"
+  done
+  if [ -f "$projdir/domains" ]; then
+    while IFS= read -r d; do [ -n "$d" ] && state_del "$d"; done < "$projdir/domains"
+  fi
+  rm -rf "$projdir"
+  info "unlinked $name"
+  generate
+}
+
+cmd_up() {
+  [ $# -eq 1 ] || die "usage: $PROG up <name>"
+  local projdir="$PROJECTS/$1"
+  [ -d "$projdir" ] || die "project not linked: $1"
+  local dir; dir="$(cat "$projdir/dir")"
+  [ -f "$dir/.rute" ] || die "no .rute in $dir"
+  local tmp idx cmd port; tmp="$(mktemp)"
+  parse_rute "$dir/.rute" > "$tmp"
+  while IFS=$'\t' read -r idx cmd port _; do
+    start_site "$projdir" "$idx" "$dir" "$cmd" "$port"
+  done < "$tmp"
+  rm -f "$tmp"
+}
+
+cmd_down() {
+  [ $# -eq 1 ] || die "usage: $PROG down <name>"
+  local projdir="$PROJECTS/$1"
+  [ -d "$projdir" ] || die "project not linked: $1"
+  local f
+  for f in "$projdir"/site-*.pid; do
+    [ -e "$f" ] || continue
+    stop_site "$projdir" "$(printf '%s' "$f" | sed 's/.*site-//; s/\.pid//')"
+  done
+  info "stopped $1"
 }
 
 cmd_rm() {
@@ -192,8 +334,24 @@ cmd_rm() {
 
 cmd_ls() {
   state_init
-  [ -s "$ROUTES" ] || { info "no routes yet"; return 0; }
-  awk 'NF && $1 !~ /^#/ { printf "%-34s -> 127.0.0.1:%s\n", $1, $2 }' "$ROUTES"
+  printf 'routes:\n'
+  if [ -s "$ROUTES" ]; then
+    awk 'NF && $1 !~ /^#/ { printf "  %-32s -> 127.0.0.1:%s\n", $1, $2 }' "$ROUTES"
+  else
+    printf '  (none)\n'
+  fi
+  printf 'projects:\n'
+  if [ -d "$PROJECTS" ] && [ -n "$(ls -A "$PROJECTS" 2>/dev/null)" ]; then
+    local p
+    for p in "$PROJECTS"/*; do
+      [ -d "$p" ] || continue
+      local st="down"
+      if [ -f "$p"/site-1.pid ] && kill -0 "$(cat "$p"/site-1.pid 2>/dev/null)" 2>/dev/null; then st="up"; fi
+      printf '  %-20s [%s]\n' "$(basename "$p")" "$st"
+    done
+  else
+    printf '  (none)\n'
+  fi
 }
 
 cmd_sync() { generate; info "synced"; }
@@ -206,14 +364,14 @@ cmd_doctor() {
   if [ -f "$NGINX_DIR/nginx.conf" ] && grep -Eq 'include[[:space:]]+.*servers/\*' "$NGINX_DIR/nginx.conf"; then
     printf 'ok    nginx.conf includes servers/*\n'
   else
-    printf 'WARN  nginx.conf has no "include servers/*.conf;" in http{} — generated conf will not load\n'; ok=0
+    printf 'WARN  nginx.conf has no "include servers/*.conf;" in http{}\n'; ok=0
   fi
   grep -q '# >>> rute >>>' "$HOSTS" 2>/dev/null && printf 'ok    /etc/hosts block present\n' || printf 'WARN  no rute block in %s (run: rute sync)\n' "$HOSTS"
   pgrep -x nginx >/dev/null 2>&1 && printf 'ok    nginx running\n' || printf 'WARN  nginx not running\n'
   if lsof -nP -iTCP:443 -sTCP:LISTEN 2>/dev/null | grep -q nginx; then
     printf 'ok    :443 owned by nginx\n'
   else
-    printf 'WARN  :443 not owned by nginx — stop whatever holds it (e.g. mkdev)\n'; ok=0
+    printf 'WARN  :443 not owned by nginx — stop whatever holds it\n'; ok=0
   fi
   [ "$ok" = 1 ] && printf '\nall good\n'
 }
@@ -221,7 +379,11 @@ cmd_doctor() {
 # ---- main ------------------------------------------------------------------
 
 case "${1:-}" in
-  add)    shift; cmd_add "$@" ;;
+  proxy|add) shift; cmd_proxy "$@" ;;
+  link)   shift; cmd_link "$@" ;;
+  unlink) shift; cmd_unlink "$@" ;;
+  up)     shift; cmd_up "$@" ;;
+  down)   shift; cmd_down "$@" ;;
   rm|remove) shift; cmd_rm "$@" ;;
   ls|list) shift; cmd_ls "$@" ;;
   sync)   shift; cmd_sync "$@" ;;
