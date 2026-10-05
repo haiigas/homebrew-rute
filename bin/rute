@@ -3,7 +3,7 @@
 # Thin orchestrator over nginx + mkcert + /etc/hosts. No proxy of its own.
 set -uo pipefail
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 PROG="rute"
 
 BREW="${RUTE_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
@@ -157,11 +157,11 @@ gen_cert() {
 
 reload_nginx() {
   have nginx || { info "nginx not found — brew install nginx"; return; }
-  if pgrep -x nginx >/dev/null 2>&1; then
-    sudo nginx -s reload 2>/dev/null || info "nginx reload failed — run: sudo nginx -s reload"
-  else
-    sudo brew services start nginx >/dev/null 2>&1 || info "nginx start failed — run: sudo brew services start nginx"
+  # try a graceful reload first; fall back to starting the service
+  if sudo nginx -s reload >/dev/null 2>&1; then
+    return 0
   fi
+  sudo brew services start nginx >/dev/null 2>&1 || info "nginx not running / reload failed — run: sudo brew services restart nginx"
 }
 
 generate() {
@@ -367,7 +367,11 @@ cmd_doctor() {
     printf 'WARN  nginx.conf has no "include servers/*.conf;" in http{}\n'; ok=0
   fi
   grep -q '# >>> rute >>>' "$HOSTS" 2>/dev/null && printf 'ok    /etc/hosts block present\n' || printf 'WARN  no rute block in %s (run: rute sync)\n' "$HOSTS"
-  pgrep -x nginx >/dev/null 2>&1 && printf 'ok    nginx running\n' || printf 'WARN  nginx not running\n'
+  if lsof -nP -iTCP:80 -sTCP:LISTEN 2>/dev/null | grep -q nginx || lsof -nP -iTCP:443 -sTCP:LISTEN 2>/dev/null | grep -q nginx; then
+    printf 'ok    nginx running\n'
+  else
+    printf 'WARN  nginx not running\n'
+  fi
   if lsof -nP -iTCP:443 -sTCP:LISTEN 2>/dev/null | grep -q nginx; then
     printf 'ok    :443 owned by nginx\n'
   else

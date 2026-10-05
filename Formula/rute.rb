@@ -1,8 +1,8 @@
 class Rute < Formula
   desc "Map local domains to ports over HTTPS (nginx + mkcert + /etc/hosts)"
   homepage "https://github.com/haiigas/homebrew-rute"
-  url "https://github.com/haiigas/homebrew-rute/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "f6141bcad8d790ebeca1840a102ea5ab049d626c514ab6c5c7f9f21b13b3519a"
+  url "https://github.com/haiigas/homebrew-rute/archive/refs/tags/v0.2.1.tar.gz"
+  sha256 "UPDATE_ME_AFTER_TAGGING"
   license "MIT"
 
   depends_on "nginx"
@@ -35,6 +35,6 @@ class Rute < Formula
   end
 
   test do
-    assert_match "rute 0.2.0", shell_output("#{bin}/rute --version")
+    assert_match "rute 0.2.1", shell_output("#{bin}/rute --version")
   end
 end
