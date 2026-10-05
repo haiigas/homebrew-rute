@@ -60,10 +60,16 @@ Point your frontends/backends at their own ports (`vite --port 4002`,
 ## Uninstall
 
 ```bash
-sudo brew services stop nginx
-rm -rf ~/.config/rute
-sudo rm -f /opt/homebrew/etc/nginx/servers/rute.conf
-# remove the "# >>> rute >>>" block from /etc/hosts
+brew uninstall rute           # remove the CLI
+brew uninstall --zap rute     # also remove everything it generated
+```
+
+`--zap` clears the generated nginx vhost + cert, `~/.config/rute`, the
+`# >>> rute >>>` block in `/etc/hosts`, then reloads nginx. Stop nginx too if
+you don't want it running:
+
+```bash
+brew services stop nginx
 ```
 
 ## License
