@@ -16,7 +16,7 @@ Two modes:
 
 ## Install
 
-```bash
+```
 brew tap haiigas/homebrew-rute
 brew install rute
 ```
@@ -25,7 +25,7 @@ Requires `nginx` and `mkcert` (pulled in automatically).
 
 ## Proxy mode
 
-```bash
+```
 rute proxy api.example.local 8080
 rute ls
 rute rm api.example.local
@@ -37,19 +37,18 @@ Point the domain at a port you run yourself.
 
 Put a `.rute` file in the project root:
 
-```toml
+```
 name = myapp
 
 [site]
 command = pnpm dev -- --port 4002
 port    = 4002
-domain  = example.local
-domain  = www.example.local
+domain  = example.local, www.example.local
 ```
 
 Then, from the project:
 
-```bash
+```
 rute link        # start every [site], wait for its port, map its domains
 rute ls
 rute down        # stop the project's servers
@@ -57,56 +56,28 @@ rute up          # start them again
 rute unlink      # stop + remove the routes
 ```
 
-`[site]` can repeat — one block per server/port. Multiple `domain` lines on one
-site share the same port and one process.
+Domains go on one line, comma-separated. `[site]` can repeat — one block per
+server/port. Every domain on a site shares that port and one process.
 
-### Example: Laravel, many domains, one app
+### Multiple servers (one repo)
 
-```toml
-name = kitanikahin
+```
+name = myapp
 
 [site]
-command = php artisan serve --host=127.0.0.1 --port=4006
-port    = 4006
-domain  = kitanikahin.local
-domain  = api.kitanikahin.local
-domain  = pay.kitanikahin.local
-```
-
-One `artisan serve`, all three domains → `:4006`. Route by host in Laravel:
-
-```php
-Route::domain('api.kitanikahin.local')->group(function () {
-    // ...
-});
-```
-
-Share the session across subdomains in `.env`:
-
-```
-APP_URL=https://kitanikahin.local
-SESSION_DOMAIN=.kitanikahin.local
-```
-
-### Example: monorepo, one server per app
-
-```toml
-name = kitanikahin
-
-[site]
-command = pnpm dev:landing -- --port 4002
+command = pnpm dev:web -- --port 4002
 port    = 4002
-domain  = kitanikahin.local
+domain  = example.local
 
 [site]
 command = pnpm dev:pay -- --port 4003
 port    = 4003
-domain  = pay.kitanikahin.local
+domain  = pay.example.local
 
 [site]
 command = go run ./cmd/api
 port    = 8080
-domain  = api.kitanikahin.local
+domain  = api.example.local
 ```
 
 `rute link` starts all three, waits for each port, and maps each domain.
@@ -124,7 +95,7 @@ $NGINX/certs/rute.pem                  # generated: cert, SAN = every domain
 `rute link` starts each `command` in its own process group (log at
 `~/.config/rute/projects/<name>/site-<n>.log`), waits until `port` accepts
 connections, then registers the routes and reloads nginx. `rute down` kills the
-whole group, so child processes (vite, go, artisan) go too.
+whole group, so child processes (vite, go, etc.) go too.
 
 ## Commands
 
@@ -148,7 +119,7 @@ whole group, so child processes (vite, go, artisan) go too.
 
 ## Uninstall
 
-```bash
+```
 brew uninstall rute           # remove the CLI
 brew uninstall --zap rute     # also remove everything it generated
 ```
