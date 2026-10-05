@@ -3,7 +3,7 @@
 # Thin orchestrator over nginx + mkcert + /etc/hosts. No proxy of its own.
 set -uo pipefail
 
-VERSION="0.2.5"
+VERSION="0.2.6"
 PROG="rute"
 
 BREW="${RUTE_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
@@ -49,15 +49,14 @@ usage:
 .rute (in a project root):
   name = myapp
   [site]
-  command = php artisan serve --host=127.0.0.1 --port=4006
-  port    = 4006
-  domain  = kitanikahin.local
-  domain  = api.kitanikahin.local
+  command = pnpm dev -- --port 4002
+  port    = 4002
+  domain  = example.dev, www.example.dev
 
 examples:
-  $PROG proxy api.example.local 8080
-  cd ~/dev/laravel-app && $PROG link
-  $PROG down laravel-app
+  $PROG proxy api.example.dev 8080
+  cd ~/dev/myapp && $PROG link
+  $PROG down myapp
 EOF
 }
 

@@ -26,9 +26,9 @@ Requires `nginx` and `mkcert` (pulled in automatically).
 ## Proxy mode
 
 ```
-rute proxy api.example.local 8080
+rute proxy api.example.dev 8080
 rute ls
-rute rm api.example.local
+rute rm api.example.dev
 ```
 
 Point the domain at a port you run yourself.
@@ -43,7 +43,7 @@ name = myapp
 [site]
 command = pnpm dev -- --port 4002
 port    = 4002
-domain  = example.local, www.example.local
+domain  = example.dev, www.example.dev
 ```
 
 Then, from the project:
@@ -70,17 +70,17 @@ name = myapp
 [site]
 command = pnpm dev:web -- --port 4002
 port    = 4002
-domain  = example.local
+domain  = example.dev
 
 [site]
 command = pnpm dev:pay -- --port 4003
 port    = 4003
-domain  = pay.example.local
+domain  = pay.example.dev
 
 [site]
 command = go run ./cmd/api
 port    = 8080
-domain  = api.example.local
+domain  = api.example.dev
 ```
 
 `rute link` starts all three, waits for each port, and maps each domain.
