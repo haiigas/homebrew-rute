@@ -53,6 +53,7 @@ rute link        # start every [site], wait for its port, map its domains
 rute ls
 rute down        # stop the project's servers
 rute up          # start them again
+rute restart     # stop then start
 rute unlink      # stop + remove the routes
 ```
 
@@ -105,6 +106,7 @@ whole group, so child processes (vite, go, etc.) go too.
 | `rute link [dir]` | read `.rute`, start servers, map domains |
 | `rute unlink [dir]` | stop + remove a project's routes |
 | `rute up <name>` / `rute down <name>` | start / stop a project |
+| `rute restart <name>` | stop then start a project |
 | `rute ls` | list routes and projects |
 | `rute rm <domain>` | remove one route |
 | `rute sync` | regenerate nginx/hosts/cert and reload |
