@@ -3,7 +3,7 @@
 # Thin orchestrator over nginx + mkcert + /etc/hosts. No proxy of its own.
 set -uo pipefail
 
-VERSION="0.2.3"
+VERSION="0.2.4"
 PROG="rute"
 
 BREW="${RUTE_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
@@ -202,6 +202,8 @@ check_ports_free() { # parse-file
 
 start_site() { # projdir idx dir command port
   local projdir="$1" idx="$2" dir="$3" cmd="$4" port="$5"
+  cmd="${cmd//\$\{PORT\}/$port}"
+  cmd="${cmd//\$PORT/$port}"
   local log="$projdir/site-$idx.log" pidfile="$projdir/site-$idx.pid"
   mkdir -p "$projdir"
   set -m
@@ -277,6 +279,19 @@ cmd_link() {
   [ -f "$dir/.rute" ] || die "no .rute in $dir"
   local name; name="$(rute_name "$dir")"
   local projdir="$PROJECTS/$name"
+
+  # if project was previously linked, stop old processes & clear old routes first
+  if [ -d "$projdir" ]; then
+    local f
+    for f in "$projdir"/site-*.pid; do
+      [ -e "$f" ] || continue
+      stop_site "$projdir" "$(printf '%s' "$f" | sed 's/.*site-//; s/\.pid//')"
+    done
+    if [ -f "$projdir/domains" ]; then
+      while IFS= read -r d; do [ -n "$d" ] && state_del "$d"; done < "$projdir/domains"
+    fi
+  fi
+
   mkdir -p "$projdir"
   printf '%s' "$dir" > "$projdir/dir"
   : > "$projdir/domains"
@@ -324,15 +339,23 @@ cmd_up() {
   local name; name="$(_project_name "${1:-}")"
   local projdir="$PROJECTS/$name"
   [ -d "$projdir" ] || die "project not linked: $name"
+
+  local running=0 f pid
+  for f in "$projdir"/site-*.pid; do
+    [ -e "$f" ] || continue
+    pid="$(cat "$f" 2>/dev/null)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      running=1; break
+    fi
+  done
+  if [ "$running" = 1 ]; then
+    info "$name is already running (use 'rute restart' to restart)"
+    return 0
+  fi
+
   local dir; dir="$(cat "$projdir/dir")"
   [ -f "$dir/.rute" ] || die "no .rute in $dir"
-  local tmp idx cmd port; tmp="$(mktemp)"
-  parse_rute "$dir/.rute" > "$tmp"
-  check_ports_free "$tmp"
-  while IFS=$'\t' read -r idx cmd port _; do
-    start_site "$projdir" "$idx" "$dir" "$cmd" "$port"
-  done < "$tmp"
-  rm -f "$tmp"
+  cmd_link "$dir"
 }
 
 cmd_down() {
@@ -349,8 +372,20 @@ cmd_down() {
 
 cmd_restart() {
   local name; name="$(_project_name "${1:-}")"
+  local projdir="$PROJECTS/$name"
+  [ -d "$projdir" ] || die "project not linked: $name"
+  local dir; dir="$(cat "$projdir/dir")"
+  [ -f "$dir/.rute" ] || die "no .rute in $dir"
+
   cmd_down "$name"
-  cmd_up "$name"
+  local newname; newname="$(rute_name "$dir")"
+  if [ "$newname" != "$name" ]; then
+    if [ -f "$projdir/domains" ]; then
+      while IFS= read -r d; do [ -n "$d" ] && state_del "$d"; done < "$projdir/domains"
+    fi
+    rm -rf "$projdir"
+  fi
+  cmd_link "$dir"
 }
 
 cmd_rm() {

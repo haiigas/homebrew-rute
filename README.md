@@ -41,7 +41,7 @@ Put a `.rute` file in the project root:
 name = myapp
 
 [site]
-command = pnpm dev -- --port 4002
+command = pnpm dev -- --port ${PORT}
 port    = 4002
 domain  = example.local, www.example.local
 ```
@@ -53,12 +53,15 @@ rute link        # start every [site], wait for its port, map its domains
 rute ls
 rute down        # stop the project's servers
 rute up          # start them again
-rute restart     # stop then start
+rute restart     # reload .rute changes (port/domains/cmd), restart servers, update routes
 rute unlink      # stop + remove the routes
 ```
 
 Domains go on one line, comma-separated. `[site]` can repeat — one block per
 server/port. Every domain on a site shares that port and one process.
+`${PORT}` in `command` will automatically be replaced with the `port` value.
+If you change `port`, `domain`, or `command` in `.rute`, just run `rute restart`
+to apply the changes and update nginx automatically.
 
 ### Multiple servers (one repo)
 
