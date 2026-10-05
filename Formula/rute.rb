@@ -2,7 +2,7 @@ class Rute < Formula
   desc "Map local domains to ports over HTTPS (nginx + mkcert + /etc/hosts)"
   homepage "https://github.com/haiigas/homebrew-rute"
   url "https://github.com/haiigas/homebrew-rute/archive/refs/tags/v0.2.6.tar.gz"
-  sha256 "UPDATE_ME_AFTER_TAGGING"
+  sha256 "cf9604c4acb371f47b89fae1ac0c7059f9db0d4f5d24b1cdc932a56295089e07"
   license "MIT"
 
   depends_on "nginx"
