@@ -3,7 +3,7 @@
 # Thin orchestrator over nginx + mkcert + /etc/hosts. No proxy of its own.
 set -uo pipefail
 
-VERSION="0.2.4"
+VERSION="0.2.5"
 PROG="rute"
 
 BREW="${RUTE_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
@@ -202,8 +202,6 @@ check_ports_free() { # parse-file
 
 start_site() { # projdir idx dir command port
   local projdir="$1" idx="$2" dir="$3" cmd="$4" port="$5"
-  cmd="${cmd//\$\{PORT\}/$port}"
-  cmd="${cmd//\$PORT/$port}"
   local log="$projdir/site-$idx.log" pidfile="$projdir/site-$idx.pid"
   mkdir -p "$projdir"
   set -m
