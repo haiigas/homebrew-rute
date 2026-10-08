@@ -3,7 +3,7 @@
 # Thin orchestrator over nginx + mkcert + /etc/hosts. No proxy of its own.
 set -uo pipefail
 
-VERSION="0.2.6"
+VERSION="0.2.7"
 PROG="rute"
 
 BREW="${RUTE_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
@@ -99,7 +99,7 @@ gen_nginx() {
     printf '}\n\n'
 
     if [ -n "$names" ]; then
-      printf 'server {\n    listen 443 ssl;\n    http2 on;\n'
+      printf 'server {\n    listen 443 ssl;\n    listen [::]:443 ssl;\n    http2 on;\n'
       printf '    server_name %s;\n' "$names"
       printf '    ssl_certificate     %s;\n' "$CERT"
       printf '    ssl_certificate_key %s;\n' "$KEY"
@@ -113,12 +113,12 @@ gen_nginx() {
       printf '        proxy_set_header Connection "upgrade";\n'
       printf '    }\n}\n\n'
 
-      printf 'server {\n    listen 443 ssl default_server;\n    server_name _;\n'
+      printf 'server {\n    listen 443 ssl default_server;\n    listen [::]:443 ssl default_server;\n    server_name _;\n'
       printf '    ssl_certificate     %s;\n' "$CERT"
       printf '    ssl_certificate_key %s;\n' "$KEY"
       printf '    return 404;\n}\n\n'
 
-      printf 'server {\n    listen 80;\n    server_name %s;\n    return 301 https://$host$request_uri;\n}\n\n' "$names"
+      printf 'server {\n    listen 80;\n    listen [::]:80;\n    server_name %s;\n    return 301 https://$host$request_uri;\n}\n\n' "$names"
     fi
   } > "$tmp"
   mv "$tmp" "$CONF"
@@ -129,7 +129,7 @@ gen_hosts() {
   [ -f "$HOSTS" ] && awk '/# >>> rute >>>/{s=1} /# <<< rute <<</{s=0; next} !s' "$HOSTS" > "$tmp"
   {
     printf '# >>> rute >>>\n'
-    awk 'NF && $1 !~ /^#/ { printf "127.0.0.1 %s\n", $1 }' "$ROUTES"
+    awk 'NF && $1 !~ /^#/ { printf "127.0.0.1 %s\n::1 %s\n", $1, $1 }' "$ROUTES"
     printf '# <<< rute <<<\n'
   } >> "$tmp"
   sudo tee "$HOSTS" < "$tmp" >/dev/null
