@@ -35,7 +35,7 @@ rute rm email.example.dev
 
 Put a `.rute` file in the project root:
 
-```toml
+```
 name  = site
 group = myapp
 
