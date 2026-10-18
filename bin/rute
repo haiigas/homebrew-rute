@@ -3,7 +3,7 @@
 # Thin orchestrator over nginx + mkcert + /etc/hosts. No proxy of its own.
 set -uo pipefail
 
-VERSION="0.2.7"
+VERSION="0.2.8"
 PROG="rute"
 
 BREW="${RUTE_PREFIX:-$(brew --prefix 2>/dev/null || echo /opt/homebrew)}"
@@ -35,11 +35,11 @@ $PROG $VERSION — map local domains to ports, and run project dev servers
 usage:
   $PROG proxy <domain> <port>   reverse-proxy a domain to an already-running port
   $PROG link [dir]              read .rute, start the project's servers, map domains
-  $PROG unlink [dir]            stop the project and remove its routes
-  $PROG up [name]              start a linked project's servers
-  $PROG down [name]            stop a linked project's servers
-  $PROG restart [name]         stop then start a linked project
-  $PROG ls                      list routes and projects
+  $PROG unlink [target]         stop the project and remove its routes
+  $PROG up [target]             start a linked project's servers
+  $PROG down [target]           stop a linked project's servers
+  $PROG restart [target]        stop then start a linked project
+  $PROG ls                      list grouped projects and standalone proxies
   $PROG rm <domain>             remove a single route
   $PROG sync                    regenerate nginx/hosts/cert and reload
   $PROG doctor                  check dependencies and services
@@ -47,16 +47,18 @@ usage:
   $PROG --version
 
 .rute (in a project root):
-  name = myapp
+  name  = site
+  group = myapp
   [site]
   command = pnpm dev -- --port 4002
   port    = 4002
-  domain  = example.dev, www.example.dev
+  domain  = example.dev, api.example.dev
 
 examples:
-  $PROG proxy api.example.dev 8080
+  $PROG proxy email.example.dev 8025
   cd ~/dev/myapp && $PROG link
-  $PROG down myapp
+  $PROG restart myapp/site
+  $PROG down site
 EOF
 }
 
@@ -132,7 +134,14 @@ gen_hosts() {
     awk 'NF && $1 !~ /^#/ { printf "127.0.0.1 %s\n::1 %s\n", $1, $1 }' "$ROUTES"
     printf '# <<< rute <<<\n'
   } >> "$tmp"
-  sudo tee "$HOSTS" < "$tmp" >/dev/null
+
+  # Skip sudo if /etc/hosts content is already identical
+  if [ -f "$HOSTS" ] && cmp -s "$tmp" "$HOSTS"; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  sudo cp "$tmp" "$HOSTS" 2>/dev/null || sudo tee "$HOSTS" < "$tmp" >/dev/null
   rm -f "$tmp"
   sudo dscacheutil -flushcache 2>/dev/null
   sudo killall -HUP mDNSResponder 2>/dev/null
@@ -222,8 +231,15 @@ stop_site() { # projdir idx
   local pid; pid="$(cat "$pidfile" 2>/dev/null)"
   if [ -n "$pid" ]; then
     kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
-    sleep 0.3
-    kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+    local i=0
+    while [ "$i" -lt 15 ]; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+    fi
   fi
   rm -f "$pidfile"
 }
@@ -247,16 +263,104 @@ parse_rute() {
   ' "$1"
 }
 
+rute_group() { # dir
+  local g; g="$(awk -F= '/^[[:space:]]*group[[:space:]]*=/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2; exit}' "$1/.rute" 2>/dev/null)"
+  [ -n "$g" ] || g="ungrouped"
+  printf '%s' "$g"
+}
+
 rute_name() { # dir
-  local n; n="$(awk -F= '/^name[[:space:]]*=/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2; exit}' "$1/.rute")"
+  local n; n="$(awk -F= '/^[[:space:]]*name[[:space:]]*=/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2; exit}' "$1/.rute" 2>/dev/null)"
   [ -n "$n" ] || n="$(basename "$1")"
   printf '%s' "$n"
 }
 
-_project_name() { # [name] -> name, or derived from $PWD/.rute
-  if [ $# -ge 1 ] && [ -n "$1" ]; then printf '%s' "$1"; return; fi
-  [ -f "$PWD/.rute" ] || die "no project name given and no .rute in $PWD"
-  rute_name "$PWD"
+_resolve_proj() { # [target] -> prints absolute path to projdir in $PROJECTS
+  local target="${1:-}"
+
+  # 1. Target omitted: check $PWD/.rute
+  if [ -z "$target" ]; then
+    if [ -f "$PWD/.rute" ]; then
+      local name group proj_id
+      name="$(rute_name "$PWD")"
+      group="$(rute_group "$PWD")"
+      if [ "$group" != "ungrouped" ] && [ -n "$group" ]; then
+        proj_id="${group}__${name}"
+      else
+        proj_id="$name"
+      fi
+      if [ -d "$PROJECTS/$proj_id" ]; then
+        printf '%s' "$PROJECTS/$proj_id"
+        return 0
+      elif [ -d "$PROJECTS/$name" ]; then
+        printf '%s' "$PROJECTS/$name"
+        return 0
+      fi
+    fi
+    die "no project specified and no linked .rute in $PWD"
+  fi
+
+  # 2. Target is a directory containing .rute
+  if [ -d "$target" ] && [ -f "$target/.rute" ]; then
+    local name group proj_id
+    name="$(rute_name "$target")"
+    group="$(rute_group "$target")"
+    if [ "$group" != "ungrouped" ] && [ -n "$group" ]; then
+      proj_id="${group}__${name}"
+    else
+      proj_id="$name"
+    fi
+    if [ -d "$PROJECTS/$proj_id" ]; then
+      printf '%s' "$PROJECTS/$proj_id"
+      return 0
+    elif [ -d "$PROJECTS/$name" ]; then
+      printf '%s' "$PROJECTS/$name"
+      return 0
+    fi
+  fi
+
+  # 3. Direct match: with slash normalized to __
+  local norm="${target/\//__}"
+  if [ -d "$PROJECTS/$norm" ]; then
+    printf '%s' "$PROJECTS/$norm"
+    return 0
+  fi
+  if [ -d "$PROJECTS/$target" ]; then
+    printf '%s' "$PROJECTS/$target"
+    return 0
+  fi
+
+  # 4. Search by project name across all groups
+  local matches=()
+  for p in "$PROJECTS"/*; do
+    [ -d "$p" ] || continue
+    local pbase; pbase="$(basename "$p")"
+    local pname="$pbase"
+    if [ -f "$p/name" ]; then
+      pname="$(cat "$p/name" 2>/dev/null)"
+    elif [[ "$pbase" == *__* ]]; then
+      pname="${pbase#*__}"
+    fi
+
+    if [ "$pname" = "$target" ] || [ "$pbase" = "$target" ]; then
+      matches+=("$p")
+    fi
+  done
+
+  if [ ${#matches[@]} -eq 1 ]; then
+    printf '%s' "${matches[0]}"
+    return 0
+  elif [ ${#matches[@]} -gt 1 ]; then
+    local list=""
+    for m in "${matches[@]}"; do
+      local mb; mb="$(basename "$m")"
+      local disp="${mb/__//}"
+      list="${list} ${disp}"
+    done
+    die "ambiguous project name '$target' (found:${list}) — use <group>/<name>"
+  fi
+
+  die "project not found: $target"
 }
 
 # ---- commands --------------------------------------------------------------
@@ -275,27 +379,64 @@ cmd_link() {
   local dir="${1:-$PWD}"
   [ -f "$dir/.rute" ] || die "no .rute in $dir"
   local name; name="$(rute_name "$dir")"
-  local projdir="$PROJECTS/$name"
+  local group; group="$(rute_group "$dir")"
 
-  # if project was previously linked, stop old processes & clear old routes first
+  local proj_id
+  if [ "$group" != "ungrouped" ] && [ -n "$group" ]; then
+    proj_id="${group}__${name}"
+  else
+    proj_id="$name"
+  fi
+  local projdir="$PROJECTS/$proj_id"
+
+  # Clean up old project folder if migrating from ungrouped
+  if [ -n "$name" ] && [ -d "$PROJECTS/$name" ] && [ "$PROJECTS/$name" != "$projdir" ]; then
+    for f in "$PROJECTS/$name"/site-*.pid; do
+      [ -e "$f" ] || continue
+      stop_site "$PROJECTS/$name" "$(printf '%s' "$f" | sed 's/.*site-//; s/\.pid//')"
+    done
+    if [ -f "$PROJECTS/$name/domains" ]; then
+      while IFS= read -r d; do [ -n "$d" ] && state_del "$d"; done < "$PROJECTS/$name/domains"
+    fi
+    rm -rf "$PROJECTS/$name"
+  fi
+
+  # Stop old sites of this project
   if [ -d "$projdir" ]; then
     local f
     for f in "$projdir"/site-*.pid; do
       [ -e "$f" ] || continue
       stop_site "$projdir" "$(printf '%s' "$f" | sed 's/.*site-//; s/\.pid//')"
     done
-    if [ -f "$projdir/domains" ]; then
-      while IFS= read -r d; do [ -n "$d" ] && state_del "$d"; done < "$projdir/domains"
-    fi
   fi
-
-  mkdir -p "$projdir"
-  printf '%s' "$dir" > "$projdir/dir"
-  : > "$projdir/domains"
 
   local tmp; tmp="$(mktemp)"
   parse_rute "$dir/.rute" > "$tmp"
+
+  # Wait for this project's ports to be released
+  while IFS=$'\t' read -r _ _ port _; do
+    [ -n "$port" ] || continue
+    local i=0
+    while [ "$i" -lt 10 ]; do
+      nc -z 127.0.0.1 "$port" >/dev/null 2>&1 || break
+      sleep 0.2
+      i=$((i + 1))
+    done
+  done < "$tmp"
+
   check_ports_free "$tmp"
+
+  mkdir -p "$projdir"
+  printf '%s' "$dir" > "$projdir/dir"
+  printf '%s' "$name" > "$projdir/name"
+  printf '%s' "$group" > "$projdir/group"
+
+  local old_domains=""
+  if [ -f "$projdir/domains" ]; then
+    old_domains="$(cat "$projdir/domains")"
+  fi
+
+  local new_domains=""
   local idx cmd port doms
   while IFS=$'\t' read -r idx cmd port doms; do
     [ -n "$cmd" ]  || die "site $idx: missing command"
@@ -306,19 +447,30 @@ cmd_link() {
       d="$(lower "$d")"
       valid_domain "$d" || { info "skip invalid domain: $d"; continue; }
       state_add "$d" "$port"
-      printf '%s\n' "$d" >> "$projdir/domains"
+      new_domains="${new_domains}${d}"$'\n'
       info "  linked https://$d -> 127.0.0.1:$port"
     done
   done < "$tmp"
   rm -f "$tmp"
+
+  if [ -n "$old_domains" ]; then
+    while IFS= read -r old_d; do
+      [ -z "$old_d" ] && continue
+      if ! printf '%s' "$new_domains" | grep -qx "$old_d"; then
+        state_del "$old_d"
+      fi
+    done <<< "$old_domains"
+  fi
+
+  printf '%s' "$new_domains" > "$projdir/domains"
   generate
 }
 
 cmd_unlink() {
-  local dir="${1:-$PWD}"
-  local name; name="$(rute_name "$dir")"
-  local projdir="$PROJECTS/$name"
-  [ -d "$projdir" ] || die "project not linked: $name"
+  local projdir; projdir="$(_resolve_proj "${1:-}")"
+  local disp; disp="$(basename "$projdir")"
+  disp="${disp/__//}"
+
   local f
   for f in "$projdir"/site-*.pid; do
     [ -e "$f" ] || continue
@@ -328,14 +480,14 @@ cmd_unlink() {
     while IFS= read -r d; do [ -n "$d" ] && state_del "$d"; done < "$projdir/domains"
   fi
   rm -rf "$projdir"
-  info "unlinked $name"
+  info "unlinked $disp"
   generate
 }
 
 cmd_up() {
-  local name; name="$(_project_name "${1:-}")"
-  local projdir="$PROJECTS/$name"
-  [ -d "$projdir" ] || die "project not linked: $name"
+  local projdir; projdir="$(_resolve_proj "${1:-}")"
+  local dir; dir="$(cat "$projdir/dir" 2>/dev/null)"
+  [ -f "$dir/.rute" ] || die "no .rute in $dir"
 
   local running=0 f pid
   for f in "$projdir"/site-*.pid; do
@@ -346,42 +498,32 @@ cmd_up() {
     fi
   done
   if [ "$running" = 1 ]; then
-    info "$name is already running (use 'rute restart' to restart)"
+    local disp; disp="$(basename "$projdir")"
+    disp="${disp/__//}"
+    info "$disp is already running (use 'rute restart' to restart)"
     return 0
   fi
 
-  local dir; dir="$(cat "$projdir/dir")"
-  [ -f "$dir/.rute" ] || die "no .rute in $dir"
   cmd_link "$dir"
 }
 
 cmd_down() {
-  local name; name="$(_project_name "${1:-}")"
-  local projdir="$PROJECTS/$name"
-  [ -d "$projdir" ] || die "project not linked: $name"
+  local projdir; projdir="$(_resolve_proj "${1:-}")"
+  local disp; disp="$(basename "$projdir")"
+  disp="${disp/__//}"
+
   local f
   for f in "$projdir"/site-*.pid; do
     [ -e "$f" ] || continue
     stop_site "$projdir" "$(printf '%s' "$f" | sed 's/.*site-//; s/\.pid//')"
   done
-  info "stopped $name"
+  info "stopped $disp"
 }
 
 cmd_restart() {
-  local name; name="$(_project_name "${1:-}")"
-  local projdir="$PROJECTS/$name"
-  [ -d "$projdir" ] || die "project not linked: $name"
-  local dir; dir="$(cat "$projdir/dir")"
+  local projdir; projdir="$(_resolve_proj "${1:-}")"
+  local dir; dir="$(cat "$projdir/dir" 2>/dev/null)"
   [ -f "$dir/.rute" ] || die "no .rute in $dir"
-
-  cmd_down "$name"
-  local newname; newname="$(rute_name "$dir")"
-  if [ "$newname" != "$name" ]; then
-    if [ -f "$projdir/domains" ]; then
-      while IFS= read -r d; do [ -n "$d" ] && state_del "$d"; done < "$projdir/domains"
-    fi
-    rm -rf "$projdir"
-  fi
   cmd_link "$dir"
 }
 
@@ -395,24 +537,168 @@ cmd_rm() {
 
 cmd_ls() {
   state_init
-  printf 'routes:\n'
-  if [ -s "$ROUTES" ]; then
-    awk 'NF && $1 !~ /^#/ { printf "  %-32s -> 127.0.0.1:%s\n", $1, $2 }' "$ROUTES"
-  else
-    printf '  (none)\n'
-  fi
-  printf 'projects:\n'
-  if [ -d "$PROJECTS" ] && [ -n "$(ls -A "$PROJECTS" 2>/dev/null)" ]; then
-    local p
+
+  local proj_domains_file; proj_domains_file="$(mktemp)"
+  if [ -d "$PROJECTS" ]; then
     for p in "$PROJECTS"/*; do
       [ -d "$p" ] || continue
-      local st="down"
-      if [ -f "$p"/site-1.pid ] && kill -0 "$(cat "$p"/site-1.pid 2>/dev/null)" 2>/dev/null; then st="up"; fi
-      printf '  %-20s [%s]\n' "$(basename "$p")" "$st"
+      if [ -f "$p/domains" ]; then
+        cat "$p/domains" >> "$proj_domains_file"
+      fi
     done
+  fi
+
+  printf 'PROJECTS:\n'
+  local has_projects=0
+
+  if [ -d "$PROJECTS" ] && [ -n "$(ls -A "$PROJECTS" 2>/dev/null)" ]; then
+    local proj_data_file; proj_data_file="$(mktemp)"
+
+    for p in "$PROJECTS"/*; do
+      [ -d "$p" ] || continue
+      local pbase; pbase="$(basename "$p")"
+      local pdir=""; [ -f "$p/dir" ] && pdir="$(cat "$p/dir" 2>/dev/null)"
+
+      local group=""
+      local name=""
+
+      if [ -f "$p/group" ]; then
+        group="$(cat "$p/group" 2>/dev/null)"
+      fi
+      if [ -f "$p/name" ]; then
+        name="$(cat "$p/name" 2>/dev/null)"
+      fi
+
+      if [ -z "$group" ] && [ -f "$pdir/.rute" ]; then
+        group="$(rute_group "$pdir")"
+      fi
+      if [ -z "$name" ] && [ -f "$pdir/.rute" ]; then
+        name="$(rute_name "$pdir")"
+      fi
+
+      if [ -z "$group" ]; then
+        if [[ "$pbase" == *__* ]]; then
+          group="${pbase%%__*}"
+        else
+          group="ungrouped"
+        fi
+      fi
+
+      if [ -z "$name" ]; then
+        if [[ "$pbase" == *__* ]]; then
+          name="${pbase#*__}"
+        else
+          name="$pbase"
+        fi
+      fi
+
+      local is_up=0
+      for f in "$p"/site-*.pid; do
+        [ -e "$f" ] || continue
+        local pid; pid="$(cat "$f" 2>/dev/null)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+          is_up=1
+          break
+        fi
+      done
+
+      local dot="○"
+      local st="[down]"
+      if [ "$is_up" -eq 1 ]; then
+        dot="●"
+        st="[up]"
+      fi
+
+      local p_ports=""
+      local p_doms=""
+      if [ -f "$pdir/.rute" ]; then
+        while IFS=$'\t' read -r _ _ s_port s_doms; do
+          [ -n "$s_port" ] || continue
+          p_ports="${p_ports:+${p_ports}, }:${s_port}"
+          for d in $(printf '%s' "$s_doms" | tr ',' ' '); do
+            p_doms="${p_doms:+${p_doms}, }${d}"
+          done
+        done < <(parse_rute "$pdir/.rute")
+      fi
+
+      if [ -z "$p_ports" ] && [ -f "$p/domains" ]; then
+        while IFS= read -r d; do
+          [ -z "$d" ] && continue
+          p_doms="${p_doms:+${p_doms}, }${d}"
+          local dport; dport="$(awk -v d="$d" '$1==d {print $2; exit}' "$ROUTES")"
+          if [ -n "$dport" ]; then
+            p_ports="${p_ports:+${p_ports}, }:${dport}"
+          fi
+        done < "$p/domains"
+      fi
+
+      [ -n "$p_ports" ] || p_ports="-"
+      [ -n "$p_doms" ] || p_doms="-"
+
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$group" "$name" "$dot" "$st" "$p_ports" "$p_doms" >> "$proj_data_file"
+      has_projects=1
+    done
+
+    if [ "$has_projects" -eq 1 ]; then
+      local groups
+      groups=$(awk -F'\t' '{print $1}' "$proj_data_file" | sort -u)
+
+      local reordered_groups=""
+      for g in $groups; do
+        if [ "$g" != "ungrouped" ]; then
+          reordered_groups="${reordered_groups}${g}"$'\n'
+        fi
+      done
+      if echo "$groups" | grep -qx "ungrouped"; then
+        reordered_groups="${reordered_groups}ungrouped"$'\n'
+      fi
+
+      local first_group=1
+      while IFS= read -r grp; do
+        [ -z "$grp" ] && continue
+        if [ "$first_group" -eq 0 ]; then
+          printf '\n'
+        fi
+        first_group=0
+
+        printf '  [%s]\n' "$grp"
+        awk -F'\t' -v g="$grp" '
+          $1 == g {
+            printf "    %s %-10s  %-6s  %-7s  %s\n", $3, $2, $4, $5, $6
+          }
+        ' "$proj_data_file"
+      done <<< "$reordered_groups"
+    else
+      printf '  (none)\n'
+    fi
+    rm -f "$proj_data_file"
   else
     printf '  (none)\n'
   fi
+
+  printf '\nPROXIES:\n'
+  local has_proxies=0
+  if [ -s "$ROUTES" ]; then
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      local d p
+      d="$(echo "$line" | awk '{print $1}')"
+      p="$(echo "$line" | awk '{print $2}')"
+      [ -n "$d" ] && [ -n "$p" ] || continue
+
+      if ! grep -qx "$d" "$proj_domains_file" 2>/dev/null; then
+        printf '  ● %-30s -> :%s\n' "$d" "$p"
+        has_proxies=1
+      fi
+    done < "$ROUTES"
+  fi
+
+  if [ "$has_proxies" -eq 0 ]; then
+    printf '  (none)\n'
+  fi
+
+  rm -f "$proj_domains_file"
 }
 
 cmd_sync() { generate; info "synced"; }
