@@ -48,27 +48,32 @@ domain  = example.dev, api.example.dev
 Then, from the project directory:
 
 ```
-rute link               # link project and start dev server
-rute ls                 # view grouped projects and proxies
-rute restart            # restart current project
-rute down [group/name]  # stop project
-rute up [group/name]    # start project
-rute unlink             # unlink and stop project
+rute link
 ```
 
 ## Commands
+
+`[target]` is `group/name`, or omitted to use the current directory.
+`--all` applies to every linked project.
 
 | command | what |
 |---|---|
 | `rute proxy <domain> <port>` | proxy a domain to a running port |
 | `rute link [dir]` | read `.rute`, start servers, map domains |
 | `rute unlink [target]` | stop + remove a project's routes |
-| `rute up [target]` / `rute down [target]` | start / stop a project |
-| `rute restart [target]` | stop then start a project |
+| `rute up [target\|--all]` | start a project |
+| `rute down [target\|--all]` | stop a project |
+| `rute restart [target\|--all]` | stop then start a project |
 | `rute ls` | list grouped projects and standalone proxies |
 | `rute rm <domain>` | remove one route |
 | `rute sync` | regenerate nginx/hosts/cert and reload |
 | `rute doctor` | check deps and services |
+
+## Uninstall
+
+```
+brew uninstall --zap rute
+```
 
 ## License
 
